@@ -1,0 +1,458 @@
+---
+---
+title: "amiramarkdown"
+author: "Iris Oudkerk"
+date: "2025-04-07"
+output:
+  html_document:
+    code_folding: none
+---
+
+------------------------------------------------------------------------
+# Data import and preproccessing
+```{r}
+# Laad de benodigde packages
+library(sf)
+library(dplyr)
+library(ggplot2)
+library(tseries)
+library(lmtest)
+library(furrr)
+library(future)
+library(progressr)
+library(forecast)
+library(readr)
+
+
+# 1) Read and preprocess
+predictor_data <- st_read("finished_data.gpkg") %>%
+  st_drop_geometry() %>%
+  distinct() %>%
+  mutate(date = as.Date(paste(year, month, "01", sep = "-")))
+
+crimedata <- st_read("time_space_data.gpkg") %>%
+  filter(year < 2020) %>%
+  rename(crime_count = crime_count_per_LSAO_per_month) %>%
+  mutate(log_crime_count_new = log(crime_count + 1))
+```
+# Data merging
+```{r}
+# 2) Join the additional columns
+predictor_subset <- predictor_data %>%
+  select(lsoa_code, year, month,
+         mean_temperature, max_mean_temperature, percent_youth,
+         unemployment_unadj, inf_change_1month, inf_base2015,
+         Vacation_Days, Avg_Daylight_Hours)
+
+combined_data <- crimedata %>%
+  left_join(predictor_subset, by = c("lsoa_code", "year", "month"))
+```
+
+# Explore single LSOA
+```{r}
+# 3) Filter one LSOA from combined_data
+example_lsoa <- "E01000001"
+
+data_lsoa <- combined_data %>%
+  filter(lsoa_code == example_lsoa) %>%
+  arrange(year, month)
+
+# 4) Check column names
+colnames(data_lsoa)
+```
+
+```{r}
+head(data_lsoa[, c("mean_temperature.y", "max_mean_temperature.y", 
+                   "percent_youth.y", "unemployment_unadj", 
+                   "inf_change_1month.y", "inf_base2015.y", 
+                   "Vacation_Days", "Avg_Daylight_Hours")])
+
+```
+# Time series preparation
+```{r}
+# Create time series
+ts_log_crime <- ts(data_lsoa$log_crime_count_new, start = c(2011, 1), frequency = 12)
+
+# View the time series object
+print(ts_log_crime)
+
+
+```
+```{r}
+
+# Perform the Augmented Dickey-Fuller test
+adf_result <- adf.test(ts_log_crime)
+print(adf_result)
+
+# qqplot
+qqnorm(ts_log_crime)
+qqline(ts_log_crime)
+
+```
+
+# Differencing if needed
+```{r}
+# Check for stationarity
+if(adf_result$p.value > 0.05) {
+  ts_log_crime_diff <- diff(ts_log_crime, differences = 1)
+
+  
+  # ADF test on differenced series
+  adf_result_diff <- adf.test(ts_log_crime_diff)
+  print(adf_result_diff)
+  
+  # Model with differentiated serie
+  ts_for_model <- ts_log_crime_diff
+} else {
+  ts_for_model <- ts_log_crime
+}
+
+```
+
+# Fit SARIMA model (without covariates)
+```{r}
+# Fit a SARIMA-model with seasonal component
+sarima_model <- auto.arima(ts_log_crime, seasonal = TRUE)
+summary(sarima_model)
+
+# check residuals fitted model
+checkresiduals(sarima_model)
+
+```
+
+In this model (ARIMA(1,0,0)), only the autoregressive coefficient is estimated, which indicates the extent to which the current value of the transformed time series is influenced by the immediately preceding value, as well as the mean level of the time series.
+
+σ² = 0.378 reflects the variance of the residuals; the model residuals are not highly variable.
+
+The AIC is 205.55, the RMSE is 0.609, and the MAE is 0.497.
+
+This model appears to function well internally, as the residuals do not show significant autocorrelation.
+
+```{r}
+# Rename columns and remove redundant ones
+data_lsoa <- data_lsoa %>%
+  rename(
+    mean_temperature = mean_temperature.y,
+    max_mean_temperature = max_mean_temperature.y,
+    percent_youth = percent_youth.y,
+    inf_change_1month = inf_change_1month.y,
+    inf_base2015 = inf_base2015.y
+  ) %>%
+  select(-ends_with(".x"))
+
+# Remove geometry column
+data_lsoa <- st_drop_geometry(data_lsoa)
+
+# Print column names
+print(colnames(data_lsoa))
+
+```
+
+# Fit SARIMAX model (with covariates)
+```{r}
+# Prepare xreg matrix
+desired_vars <- c("mean_temperature", "max_mean_temperature", "percent_youth", 
+                  "unemployment_unadj", "inf_change_1month", "inf_base2015", 
+                  "Vacation_Days", "Avg_Daylight_Hours")
+
+xreg <- data_lsoa %>% 
+  select(all_of(desired_vars)) %>%
+  mutate(across(everything(), as.numeric)) %>%
+  as.matrix()
+
+print(dim(xreg))  
+
+# Remove first row because of the diff function is 1 row shorter
+xreg <- xreg[-1, ]  
+print(dim(xreg))  
+
+
+```
+
+```{r}
+# Fit SARIMAX model
+sarimax_model <- auto.arima(ts_log_crime_diff, xreg = xreg, seasonal = TRUE, trace = TRUE, approx = TRUE)
+summary(sarimax_model)
+```
+
+```{r}
+checkresiduals(sarimax_model)
+
+```
+
+```{r}
+coeftest(sarimax_model)
+```
+# Parallel SARIMAX per LSOA
+```{r eval=FALSE, include=FALSE}
+#setup parallel plan
+plan(multisession, workers = parallel::detectCores())
+
+# Output filename
+output_file <- "Sarimax_results2mean_max.csv"
+
+# Get list of unique LSOA codes
+lsoa_codes <- unique(combined_data$lsoa_code)
+
+# Initialize CSV with correct column structure
+write_csv(
+  tibble(
+    lsoa_code = character(),
+    AIC = numeric(),
+    BIC = numeric(),
+    RMSE = numeric(),
+    temp_coef = numeric(),
+    temp_pval = numeric(),
+    model_fit = logical()
+  ),
+  output_file
+)
+
+# Define the function that fits a SARIMAX model for one LSOA
+analyse_lsoa <- function(lsoa) {
+  data_lsoa <- combined_data %>%
+    filter(lsoa_code == lsoa) %>%
+    arrange(year, month) %>%
+    rename(
+      max_mean_temperature = max_mean_temperature.y,
+      mean_temperature = mean_temperature.y,
+      percent_youth = percent_youth.y,
+      inf_change_1month = inf_change_1month.y,
+      inf_base2015 = inf_base2015.y
+    ) %>%
+    select(-ends_with(".x")) %>%
+    st_drop_geometry()
+  
+  # Skip if there is not enough data
+  if (nrow(data_lsoa) < 24) return(tibble(
+    lsoa_code = lsoa,
+    AIC = NA, BIC = NA, RMSE = NA,
+    temp_coef = NA, temp_pval = NA,
+    model_fit = FALSE
+  ))
+  
+  # Convert to a time series object
+  ts_log <- ts(data_lsoa$log_crime_count_new, start = c(2011, 1), frequency = 12)
+
+  # ✅ ADF-test to check for stationarity
+   adf <- tryCatch(adf.test(ts_log), error = function(e) return(NULL))
+  if (is.null(adf) || is.na(adf$p.value)) return(tibble(
+    lsoa_code = lsoa,
+    AIC = NA, BIC = NA, RMSE = NA,
+    temp_coef = NA, temp_pval = NA,
+    model_fit = FALSE
+  ))
+
+   # Difference the series if it's not stationary
+  ts_final <- if (adf$p.value > 0.05) diff(ts_log, 1) else ts_log
+
+  # Skip if differenced series has missing values or is empty
+  if (any(is.na(ts_final)) || length(ts_final) == 0) return(tibble(
+    lsoa_code = lsoa,
+    AIC = NA, BIC = NA, RMSE = NA,
+    temp_coef = NA, temp_pval = NA,
+    model_fit = FALSE
+  ))
+
+  # Select external regressors
+  xreg_vars <- c("max_mean_temperature", "percent_youth", 
+                 "unemployment_unadj", "inf_change_1month", 
+                 "inf_base2015", "Vacation_Days")
+
+ 
+  xreg <- data_lsoa %>%
+    select(all_of(xreg_vars)) %>%
+    mutate(across(everything(), as.numeric)) %>%
+    as.matrix()
+ # Trim xreg to match the length of the time series (after the diff function)
+  if (length(ts_final) != nrow(xreg)) {
+    xreg <- tail(xreg, length(ts_final))
+  }
+
+  # Fit SARIMAX model with external regressors
+  model <- tryCatch({
+    auto.arima(ts_final, xreg = xreg, seasonal = TRUE)
+  }, error = function(e) return(NULL))
+
+  # If model was succesfully fitted, extract stats and write to CSV
+  if (!is.null(model)) {
+    coefs <- tryCatch(coeftest(model), error = function(e) return(NULL))
+    temp_coef <- if (!is.null(coefs) && "max_mean_temperature" %in% rownames(coefs)) coefs["max_mean_temperature", 1] else NA
+    temp_pval <- if (!is.null(coefs) && "max_mean_temperature" %in% rownames(coefs)) coefs["max_mean_temperature", 4] else NA
+
+    result <- tibble(
+      lsoa_code = lsoa,
+      AIC = AIC(model),
+      BIC = BIC(model),
+      RMSE = accuracy(model)[1, "RMSE"],
+      temp_coef = temp_coef,
+      temp_pval = temp_pval,
+      model_fit = TRUE
+    )
+
+    write_csv(result, output_file, append = TRUE)
+    return(result)
+  } else {
+    # If the model failed, return NA filled row
+    return(tibble(
+      lsoa_code = lsoa,
+      AIC = NA, BIC = NA, RMSE = NA,
+      temp_coef = NA, temp_pval = NA,
+      model_fit = FALSE
+    ))
+  }
+}
+
+# 🔁 With progressbar
+with_progress({
+  resultaten <- future_map_dfr(
+    lsoa_codes,
+    analyse_lsoa,
+    .options = furrr_options(seed = TRUE),
+    .progress = TRUE
+  )
+})
+
+
+
+```
+
+# Results overview
+```{r}
+# load SARIMAX results
+result_df_max <- read_csv("Sarimax_results2mean_max.csv")
+
+str(result_df_max)
+```
+
+```{r}
+# Summarize model fit statistics
+result_df_max |>
+  summarise(
+    median_AIC = median(AIC, na.rm = TRUE),
+    median_BIC = median(BIC, na.rm = TRUE),
+    median_RMSE = median(RMSE, na.rm = TRUE),
+    median_temp_coef = median(temp_coef, na.rm = TRUE)
+  )
+
+```
+
+```{r}
+# Load the SARIMAX results
+result_df <- read_csv("Sarimax_results2.csv")
+
+# View the first few rows of the results
+head(result_df)
+```
+
+```{r}
+# Read in the LSOA geometries from the GeoPackage
+lsoa_shapes <- st_read("finished_data.gpkg", layer = "data", quiet = TRUE) %>%
+  rename(geometry = geom) %>%  # Rename geometry column to 'geometry' for sf compatibility
+  group_by(lsoa_code) %>%
+  summarise(geometry = st_union(geometry)) %>%
+  ungroup()
+
+# Merge SARIMAX Max temp results with spatial geometries by LSOA code
+map_data2 <- lsoa_shapes %>%
+  left_join(result_df_max, by = "lsoa_code")
+
+```
+
+```{r}
+# Plot the map with a diverging color scale for max temperature effect
+# Create plot object for mean max temperature effect
+SARIMA_coef_effect <- ggplot(map_data2) +
+  geom_sf(aes(fill = temp_coef), color = NA) +
+  scale_fill_gradient2(
+    low = "blue", mid = "white", high = "red", midpoint = 0,
+    name = "Temperature\neffect"
+  ) +
+  labs(
+    title = "Effect of mean max temperature on antisocial behaviour",
+    subtitle = "Per LSOA, based on SARIMAX coefficient",
+    fill = "Temperature\neffect"
+  ) +
+  theme_minimal()
+
+# Save plot as high-resolution PNG
+ggsave(
+  filename = "SARIMA_coef_effect.png",
+  plot = SARIMA_coef_effect,
+  width = 16,
+  height = 12,
+  dpi = 300
+)
+```
+
+```{r}
+# Add a column indicating whether the temperature coefficient is statistically significant
+
+map_data2 <- map_data2 %>%
+  mutate(temp_significant = temp_pval <0.05)
+```
+
+```{r}
+# Plot significant effects mean max temp with a clean and consistent style
+mean_max_sigplot <- ggplot(map_data2) +
+  geom_sf(aes(fill = temp_significant)) +
+  scale_fill_manual(
+    values = c("TRUE" = "orange", "FALSE" = "#f7f7f7"),
+    name = "Significant\neffect"
+  ) +
+  labs(
+    title = "Significant effect of mean max temperature on antisocial behaviour",
+    subtitle = "Per LSOA, based on p-value < 0.05",
+    fill = "Significant"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 10),
+    legend.position = "right"
+  )
+
+ggsave("Sarima_significant_effect.png", plot = mean_max_sigplot, width = 16, height = 12, dpi = 300)
+```
+
+```{r}
+# Count how many LSOAs have a significant temperature effect (p < 0.05)
+sig_counts <- map_data2 %>%
+  mutate(temp_significant = temp_pval < 0.05) %>%
+  st_drop_geometry() %>%  # Drop geometry to simplify table
+  count(temp_significant) %>%
+  mutate(
+    percentage = round(100 * n / sum(n), 1),
+    label = paste0(percentage, "%")
+  )
+
+```
+
+```{r}
+# Plot pie chart of significance
+ggplot(sig_counts, aes(x = "", y = n, fill = temp_significant)) +
+  geom_col(width = 1, color = "white") +
+  coord_polar(theta = "y") +
+  geom_text(
+    aes(label = label),
+    position = position_stack(vjust = 0.5),
+    size = 5
+  ) +
+  scale_fill_manual(
+    values = c("TRUE" = "#ef8a62", "FALSE" = "#f7f7f7"),
+    name = "Significance (p < 0.05)",
+    labels = c("Not significant", "Significant")
+  ) +
+  labs(
+    title = "Share of LSOAs with a significant temperature effect",
+    subtitle = "Based on SARIMAX model (p < 0.05)",
+    x = NULL, y = NULL
+  ) +
+  theme_void() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 10),
+    legend.position = "right"
+  )
+
+```
