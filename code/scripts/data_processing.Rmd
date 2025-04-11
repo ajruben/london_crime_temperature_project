@@ -1,0 +1,355 @@
+---
+title: "Data processing "
+author: "Agnieszka Kubica"
+date: "`r Sys.Date()`"
+output: html_document
+---
+## Set up
+```{r}
+# Loading
+library("tidyverse")
+library(sf)
+library(mice)
+library(readxl)
+```
+
+```{r}
+# Extracting London's lsoa codes to subset data: 
+data_crime <- 
+  st_layers("./data_group_assignment/LSOA_temp_crime_monthly.gpkg")
+
+lsoa_codes_data <- st_read(dsn = "./data_group_assignment/LSOA_temp_crime_monthly.gpkg", layer='aggr_per_LSOA')|>
+  select(LSOA11CD)|>
+  rename(lsoa_code = LSOA11CD)|>
+  st_drop_geometry()
+
+lsoa_codes <- unique(lsoa_codes_data$lsoa_code)
+```
+
+## Ethnic diversity
+
+```{r}
+# Making Shannon Equitability Index  
+# description of index: https://www.statology.org/shannon-diversity-index/
+# method: https://archives.huduser.gov/healthycommunities/sites/default/files/public/Racial%20Diversity%20using%20Shannon-Wiener%20Index.pdf
+
+df_ethnic <- read_csv("./data_group_assignment/2011_census/ethnic_structure.csv")|>
+  # renaming variables for ease of referencing
+  rename(total_pop = `Ethnic Group: All categories: Ethnic group; measures: Value`, 
+         lsoa_code = `geography code`)|>
+  # removing redundant columns
+  select(- `Rural Urban`, - date, - geography)|>
+  # finding number of people per ethnic group per lsoa
+  mutate(ethnic_white = across(starts_with("Ethnic Group: White:")) %>% rowSums(),
+         ethnic_mixed = across(starts_with("Ethnic Group: Mixed/multiple ethnic group:")) %>% rowSums(),
+         ethnic_asian = across( starts_with("Ethnic Group: Asian/Asian British:")) %>% rowSums(),
+         ethnic_black = across( starts_with("Ethnic Group: Black/African/Caribbean/Black British")) %>% rowSums(),
+         ethnic_other = across( starts_with("Ethnic Group: Other ethnic group:")) %>% rowSums()
+         )|>
+  # removing redundant columns
+  select(lsoa_code, total_pop, ethnic_white, ethnic_mixed, ethnic_asian, ethnic_black, ethnic_other)|>
+  # subset to only the needed lsoas:
+  filter(lsoa_code %in% lsoa_codes)|>
+  pivot_longer(cols = starts_with("ethnic_"), 
+               values_to = "number_of_people", 
+               names_to = "ethnic_group")
+df_ethnic
+
+# computing the diversity index 
+df_diversity_11 <- df_ethnic |>
+  mutate(proportion_ethnic_group = ifelse(number_of_people == 0, 0, number_of_people / total_pop), # if population = 0, ethnic diversity set to 0 
+         multiplied_11 = ifelse(proportion_ethnic_group == 0, 0, -1 * proportion_ethnic_group*log(proportion_ethnic_group)))|>
+  group_by(lsoa_code)|>
+  summarize(ethnic_diversity_index_11 = sum(multiplied_11)/5)
+df_diversity_11
+```
+
+
+
+## Percent youth in  population
+
+```{r}
+# specifying the path name 
+path_base <- "./data_group_assignment/population_per_age/pop"
+
+# loading data on population per age year per LSOA for years 2012-2019
+datasets <- list()
+
+for (year in 2012:2019) {
+  path <- paste0(path_base, year, ".xlsx")
+  data_name <- paste0("pop", year)
+  datasets[[data_name]] <- read_excel(path, sheet = 4, skip = 4)
+  assign(data_name, datasets[[data_name]], envir = .GlobalEnv)  # Save in global environment
+}
+
+```
+
+```{r}
+# Extracting population per age year data per OA for 2011 (different format)
+pop2011 <- read_excel("data_group_assignment/population_per_age/pop2011.xls", 
+    sheet = "london_2011")
+pop2011
+```
+
+```{r}
+# Funtion computing the percent of total population between 15 and 24
+compute_youth_data <- function(dataframe, year){
+  dataframe %>% 
+  rename(sum_pop_oa = `All Ages`,
+         lsoa_code = LSOA11CD)|>
+  mutate(sum_youth_oa = `15`+`16`+ `17` + `18` + `19` + `20` + `21` + `22` + `23` + `24`) |>
+    select(lsoa_code, sum_pop_oa, sum_youth_oa)|>
+    group_by(lsoa_code)|>
+    summarize(sum_pop = sum(sum_pop_oa), sum_youth = sum(sum_youth_oa))|>
+    mutate(percent_youth = 100 * sum_youth/sum_pop)|>
+    rename_with(~ paste0(., "_", year), c(sum_youth, percent_youth, sum_pop))
+    }
+
+for (x in 2012:2019) {
+  assign(paste0("youth_data_", x), compute_youth_data(get(paste0("pop", x)), year = x), envir = .GlobalEnv)
+}
+```
+
+```{r}
+# estabilishing a mapping from OA to LSOA for 2011 data
+oa_lsoa_mapping <- read_csv("data_group_assignment/population_per_age/2011 _OA-LSOA-MSOA-LA.csv")|>
+  rename(lsoa_code = LSOA11CD)|>
+  select(OA11CD, lsoa_code)
+oa_lsoa_mapping
+```
+
+
+```{r}
+# calculating percentage of youth in population for 2011 at LSOA level
+youth_data_2011 <- pop2011 |>
+  left_join(oa_lsoa_mapping, by = "OA11CD")|>
+    rename(sum_pop_oa = `All Ages`)|>
+  mutate(sum_youth_oa = `15`+`16`+ `17` + `18` + `19` + `20` + `21` + `22` + `23` + `24`) |>
+    select(lsoa_code, sum_pop_oa, sum_youth_oa)|>
+    group_by(lsoa_code)|>
+    summarize(sum_pop = sum(sum_pop_oa), sum_youth = sum(sum_youth_oa))|>
+    mutate(percent_youth = 100 * sum_youth/sum_pop)|>
+    rename_with(~ paste0(., "_", 2011), c(sum_youth, percent_youth, sum_pop))
+youth_data_2011
+
+```
+
+
+```{r}
+# combining all youth datasets into one
+youth_data_list <- list(youth_data_2011, youth_data_2012,youth_data_2013 ,youth_data_2014, youth_data_2014, youth_data_2015, youth_data_2016, youth_data_2017, youth_data_2018, youth_data_2019)
+
+
+youth_data_combined <- reduce(youth_data_list, full_join, by = c("lsoa_code"))|>
+  pivot_longer(
+    cols = sum_pop_2011:percent_youth_2019,
+    names_to = c(".value", "year"),
+    names_pattern = "(.*)_(\\d+)" ) |>
+  mutate(
+    year = as.numeric(year)
+  ) |>
+  filter(lsoa_code %in% lsoa_codes)
+youth_data_combined
+```
+
+
+## Population density
+
+```{r}
+# Finding population density
+area_path <- "./data_group_assignment/land-area-population-density-lsoa11-msoa11.xlsx"
+
+# Importing data on lsoa area
+lsoa_area_df <- read_excel(area_path, sheet = "LSOA11")|>
+  rename(lsoa_code = `LSOA11 Code`, 
+         msoa_code = `MSOA11CD`, 
+         lsoa_area = `Area Sq Km`)|>
+  select(lsoa_code, msoa_code, lsoa_area) 
+
+lsoa_area_df
+
+# Joining with youth data
+data_youth_density <- youth_data_combined |>
+  left_join(lsoa_area_df,  by = c("lsoa_code" = "lsoa_code")) |> # left join, since youth data was filtered for London's LSOAs
+  # Calculating population density
+  mutate(population_density = sum_pop / lsoa_area)|>
+  select(- msoa_code)
+
+data_youth_density
+```
+
+```{r}
+# Missing data check
+md.pattern(data_youth_density, rotate.names = TRUE)
+```
+
+
+
+## Inflation
+```{r}
+# Import the 3 inflation types we considered
+df_inf1 <- read_csv("./data_group_assignment/Inflation/inflation_change_1.csv") |>
+  rename(inf_change_1month = inflation_value)
+df_inf2 <- read_csv("./data_group_assignment/Inflation/inflation_change_12.csv")|>
+  rename(inf_change_year = inflation_value)
+df_inf3 <- read_csv("./data_group_assignment/Inflation/inflation_rate.csv")|>
+  rename(inf_base2015 = inflation_value)
+
+# Combine into one dataframe
+inf_data_list <- list(df_inf1, df_inf2, df_inf3)
+inf_data_combined <- reduce(inf_data_list, inner_join, by = c("year", "month"))
+inf_data_combined
+```
+
+## Daylight hours
+```{r}
+# Import daylight hours data
+
+# Path to your downloaded file (adjust if needed)
+file_path <- "./data_group_assignment/London_Monthly_Avg_Daylight_2011_2025.csv"
+
+df_light <- read.csv(file_path, sep = ";")|>
+  rename(year = Year, 
+         month = Month)
+df_light
+```
+
+## Holiday days 
+```{r}
+# Import data on number of school vacation days per month
+file_path <- "./data_group_assignment/Iris_data/school_vacation_days_uk_2011_2024_estimated.csv"
+uni_holidays <- read.csv(file_path, sep = ";")|>
+  rename(year = Year, month = Month)
+uni_holidays
+
+```
+
+## Unemployment - temporal
+```{r}
+# Import monthly unemployment 
+file_path <- "./data_group_assignment/Iris_data/month_unemp_not_adj.csv"
+unemp_data <- read.csv(file_path)%>%
+  mutate(
+    Date = as.Date(observation_date, format = "%Y-%m-%d"), # Convert to Date
+    year = year(Date),    # Extract Year
+    month = month(Date)   # Extract Month as numeric
+  ) %>%
+  select(-Date, -observation_date)|>
+  rename(unemployment_unadj = LRHUTTTTGBM156N)
+unemp_data
+```
+
+## 2011 census - economic status/unemployment/median age
+```{r}
+# Import data from 2011 census
+file_path <- "./data_group_assignment/2011_census/"
+
+# Median age
+age_structure <- read.csv(paste0(file_path, "age_structure.csv"))|>
+  mutate(median_age = `Age..Median.Age..Rural.Urban..Total..measures..Value`)|>
+  select(geography.code, median_age)
+  
+# Percent of people that are unemployed
+econ_activity <-read.csv(paste0(file_path, "econ_activity.csv")) |>
+  mutate(per_unemployment_lsoa_2011 = `Economic.Activity..Economically.active..Unemployed..measures..Value`/ `Economic.Activity..All.categories..Economic.activity..measures..Value`) |>
+  select(geography.code, per_unemployment_lsoa_2011)
+
+# Percent of people with "lowest social grade" -> percent of people with small to no incomes and likely living in poverty
+social_grade <- read.csv(paste0(file_path, "social_grade.csv"))|>
+  mutate(per_social_grade_DE =  Social.Grade..Approximated.social.grade.DE..measures..Value /  Social.Grade..Approximated.social.grade..measures..Value )|>
+  select(geography.code, per_social_grade_DE)
+
+
+social_grade
+
+# Combine data into one dataframe
+census_data_list <- list(age_structure, econ_activity, social_grade)
+census_data <- reduce(census_data_list, full_join, by = c("geography.code"))
+census_data
+```
+
+# Quick OSM features
+```{r}
+# Import data on parks, bars and sport facilities
+osm_features <- 
+  st_layers("./data_group_assignment/london_lsoa_osm_features.gpkg")
+osm_features
+data_features <- st_read(dsn = "./data_group_assignment/london_lsoa_osm_features.gpkg", layer='lsoa_osm_features')|>st_drop_geometry()|>
+  rename(lsoa_code = LSOA11CD)|>
+  select(lsoa_code, parks_count_within, bars_pubs_count_within, sports_count_within, pct_park_area_within)
+
+data_features
+colnames(data_features)
+```
+
+
+
+# Crime and temperature data
+```{r}
+# Import data on ASB and max temperature
+data_crime <- 
+  st_layers("./data_group_assignment/LSOA_temp_crime_monthly.gpkg")
+
+data_crime_temp <- st_read(dsn = "./data_group_assignment/LSOA_temp_crime_monthly.gpkg", layer='aggr_per_LSOA')%>%
+  mutate(
+    date = as.Date(date, format = "%y-%m-%d"), # Convert to Date
+    year = as.numeric(year(date)),    # Extract Year
+    month = as.numeric(month(date)))   # Extract Month as numeric
+
+# Replace all NA with 0 -> no points was found in the polygon, therefore 0 reported crimes
+data_crime_temp$crime_count_per_LSAO_per_month[is.na(data_crime_temp$crime_count_per_LSAO_per_month)] = 0
+
+# Apply log transform to reduce right skewdness
+# +1 to avoid infinite values for 0 crime count, a common solution that does not impact the modelling meaningfully 
+data_crime_temp <- data_crime_temp|>
+  mutate(log_crime_count = log(crime_count_per_LSAO_per_month + 1)) 
+
+data_crime_temp
+
+```
+
+## Joining data
+
+```{r}
+# Join all of the datasets
+crime_temporal <- data_crime_temp %>%
+  # remove data from 2010
+  filter(year != 2010)|>
+  left_join(data_youth_density, by = c("LSOA11CD" = "lsoa_code", "year" = "year"))|>
+  left_join(df_diversity_11, by = c("LSOA11CD" = "lsoa_code"))|>
+  left_join(inf_data_combined, by = c("month" = "month", "year" = "year"))|>
+  mutate(lsoa_code = LSOA11CD) |>
+  select(lsoa_code, year, month, date, everything())|>
+  select(!LSOA11CD) |>
+  left_join(df_light, c("year", "month"))|>
+  left_join(uni_holidays, c("year", "month"))|>
+  left_join(unemp_data, c("year", "month"))|>
+  left_join(census_data, c("lsoa_code"="geography.code"))|>
+  left_join(data_features, c("lsoa_code" = "lsoa_code"))
+crime_temporal
+```
+
+```{r}
+# select only needed variables
+crime_and_spatial_selected <- crime_temporal |>
+  select(- inf_change_year, - date, - lsoa_area, - sum_youth, - sum_pop)|>
+  # subset to study period
+  filter(year >= 2011 & year <= 2019)
+crime_and_spatial_selected
+```
+
+
+# Save data
+```{r}
+st_write(crime_and_spatial_selected, dsn="./data/finished_data.gpkg", layer='data', append = FALSE)
+```
+
+
+# Missing data check
+```{r}
+
+md.pattern(crime_and_spatial_selected, rotate.names = TRUE)
+
+```
+
+
