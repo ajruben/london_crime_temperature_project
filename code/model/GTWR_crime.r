@@ -29,6 +29,7 @@ resolve_data_path <- function() {
   if (nzchar(env) && file.exists(env)) return(env)
   here <- normalizePath(getwd())
   candidates <- c(
+    file.path(here, "data", "finished_data.gpkg"),   # run from the repo root
     file.path(dirname(dirname(here)), "data",  "finished_data.gpkg"),
     file.path(dirname(dirname(here)), "cache", "finished_data.gpkg"),
     file.path(here, "finished_data.gpkg"),
@@ -41,10 +42,26 @@ data_path <- resolve_data_path()
 message("Reading crime data from: ", data_path)
 
 crimedata <- st_read(data_path)
-if ("log_crime_count" %in% names(crimedata)) {
-  if ("crime_count" %in% names(crimedata))
-    crimedata <- crimedata %>% select(-crime_count)
-  crimedata <- crimedata %>% rename(crime_count = log_crime_count)
+
+# GTWR_RESPONSE picks which count to model: the total ("crime_count", the
+# default) or a single crime type such as "n_burglary". Types matter here --
+# they respond to temperature with opposite signs, so the total cancels
+# signal. Everything is modelled on the log1p scale, matching the
+# precomputed log_crime_count.
+.response <- Sys.getenv("GTWR_RESPONSE", unset = "crime_count")
+if (identical(.response, "crime_count")) {
+  if ("log_crime_count" %in% names(crimedata)) {
+    if ("crime_count" %in% names(crimedata))
+      crimedata <- crimedata %>% select(-crime_count)
+    crimedata <- crimedata %>% rename(crime_count = log_crime_count)
+  }
+} else {
+  if (!(.response %in% names(crimedata)))
+    stop(sprintf("GTWR_RESPONSE='%s' is not a column. Available: %s",
+                 .response,
+                 paste(grep("^n_", names(crimedata), value = TRUE), collapse = ", ")))
+  message("Response: log1p(", .response, ")")
+  crimedata$crime_count <- log1p(as.numeric(crimedata[[.response]]))
 }
 .sample_n <- suppressWarnings(as.integer(Sys.getenv("GTWR_SAMPLE_N", unset = "")))
 if (!is.na(.sample_n) && .sample_n > 0 && .sample_n < nrow(crimedata)) {
@@ -152,6 +169,12 @@ optimal_bw_info <- tryCatch({
 })
 message("Bandwidth selection done at: ", Sys.time())
 message("Selected bandwidth: ", optimal_bw_info)
+
+# The bandwidth-search distance matrix is dead once the bandwidth is chosen
+# and is 8*min(subset_size, n)^2 bytes -- 5 GB at 25000 points. Holding it
+# through the full fit is pure headroom lost.
+rm(spatial_distance_matrix, crimedata_spt_subset)
+invisible(gc())
 
 dp.locat          <- coordinates(crimedata_spt)
 regression.points <- crimedata_spt
