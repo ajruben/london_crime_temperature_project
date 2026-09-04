@@ -36,6 +36,36 @@ First run fetches boundaries, crime and temperature; responses are cached under
 (`data.police.uk`) returns intermittent 502s — just re-run, the cache means it
 picks up where it stopped.
 
+**The crime API serves a rolling 36-month window** (as of 2026-09: 2023-08 to
+2026-07). `START_MONTH`/`END_MONTH` in `common.py` currently ask for 2024, so
+that becomes unfetchable from around 2027-01. The per-request cache under
+`cache/` is what makes an old window reproducible — but only the boundary
+downloads are committed, not the crime responses. Archive
+`data/raw/crime/*.parquet` if you need this exact panel later.
+
+## Temperature data: read this first
+
+`aggregate_temperature.py` uses a real raster if one is present in
+`data/raw/temperature/` and otherwise **synthesises** the series. The
+synthetic fallback is London monthly climatology minus a north-south ramp
+plus a seeded per-LSOA offset -- i.e. 12 distinct values and a constant per
+LSOA, correlating 0.999 with the hardcoded climatology.
+
+A "temperature effect" estimated from the synthetic series is a **seasonality**
+effect wearing degC units, and its spatial variation is a ramp plus
+`default_rng(42)` noise, so a geographically weighted temperature coefficient
+fits that noise.
+
+The pipeline now refuses to synthesise unless you pass
+`ALLOW_SYNTHETIC_TEMPERATURE=1`, records provenance in
+`data/raw/temperature/temperature_source.txt`, and warns on every run that
+reuses a synthetic file.
+
+For real data use HadUK-Grid monthly mean temperature (1 km, `tas`) from CEDA
+(free, registration required: <https://catalogue.ceda.ac.uk/>, search
+"HadUK-Grid"); drop the NetCDF in `data/raw/temperature/` and delete
+`temperature_by_lsoa_month.parquet` to force a rebuild.
+
 ## Pipeline
 
 `run_pipeline.py` runs four Python steps then the R fit:
@@ -73,8 +103,8 @@ Environment variables:
 | `GWMODEL_REPO` | `../GWmodel` | patched GWmodel checkout |
 | `CRIME_DATA_GPKG` | `<repo>/data/finished_data.gpkg` | input data |
 | `GTWR_RESPONSE` | `crime_count` | which count to model, e.g. `n_burglary` |
-| `GTWR_SAMPLE_N` | *(unset — all rows)* | subsample size |
-| `GTWR_MINIMAL` | `0` | `1` = temperature only |
+| `GTWR_SAMPLE_N` | unset = all rows; `run_pipeline.py` passes `800` | subsample size |
+| `GTWR_MINIMAL` | `0` | `1` = temperature only; `0` adds any of the covariate list present in the data (currently `population_density`) |
 
 ```bash
 export GWMODEL_REPO=/path/to/GWmodel

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import geopandas as gpd
@@ -13,6 +14,7 @@ from common import (
 log = get_logger("aggregate_temperature")
 
 OUT = TEMP_DIR / "temperature_by_lsoa_month.parquet"
+SOURCE_TAG = TEMP_DIR / "temperature_source.txt"
 
 MONTHLY_CLIMATOLOGY_C = {
     1: 5.4, 2: 5.6, 3: 7.6, 4: 9.7, 5: 12.9, 6: 15.9,
@@ -91,12 +93,49 @@ def _synthetic() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+SYNTHETIC_REFUSAL = """No temperature raster found in {d}.
+
+mean_temperature is this project's independent variable, so the pipeline
+will not silently invent it. Either:
+
+  * put a HadUK-Grid monthly mean-temperature NetCDF (1 km, tas) covering
+    {start}..{end} in that directory -- free from CEDA, registration
+    required: https://catalogue.ceda.ac.uk/ (search "HadUK-Grid"); or
+  * set ALLOW_SYNTHETIC_TEMPERATURE=1 to fall back to London monthly
+    climatology plus a fixed per-LSOA offset.
+
+The synthetic series is a relabelling of the calendar month: it holds 12
+distinct values plus a constant per LSOA, so any "temperature effect"
+estimated from it is a seasonality effect, and its spatial variation is
+a north-south ramp plus seeded noise."""
+
+
+def _note_source(kind: str) -> None:
+    SOURCE_TAG.parent.mkdir(parents=True, exist_ok=True)
+    SOURCE_TAG.write_text(kind + chr(10), encoding="utf-8")
+
+
 def run() -> None:
     if OUT.exists():
-        log.info("SKIP %s (already exists)", OUT.name)
+        # Re-announce provenance every run: the file is written once and
+        # reused, so a one-off warning on first build is easy to miss.
+        kind = SOURCE_TAG.read_text(encoding="utf-8").strip() if SOURCE_TAG.exists() else "unknown"
+        if kind.startswith("synthetic"):
+            log.warning("%s holds SYNTHETIC temperature (%s). Delete it and "
+                        "supply a raster for real data.", OUT.name, kind)
+        else:
+            log.info("SKIP %s (already exists, source: %s)", OUT.name, kind)
         return
     raster = _find_raster()
-    df = _from_raster(raster) if raster else _synthetic()
+    if raster is None:
+        if os.environ.get("ALLOW_SYNTHETIC_TEMPERATURE") != "1":
+            raise SystemExit(SYNTHETIC_REFUSAL.format(
+                d=TEMP_DIR, start=START_MONTH, end=END_MONTH))
+        df = _synthetic()
+        _note_source("synthetic: London monthly climatology + seeded per-LSOA offset")
+    else:
+        df = _from_raster(raster)
+        _note_source(f"raster: {raster.name}")
     OUT.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(OUT, index=False)
     log.info("Wrote %s (%d rows)", OUT, len(df))
