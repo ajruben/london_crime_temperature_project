@@ -13,6 +13,10 @@ from common import (
 
 log = get_logger("build_gpkg")
 
+# Keep a crime category only if it is non-zero in at least this share of
+# LSOA-months; sparser than that and it cannot support a local fit.
+MIN_NONZERO_FRACTION = 0.15
+
 
 def _load_crimes() -> pd.DataFrame:
     files = sorted(CRIME_DIR.glob("crimes_*.parquet"))
@@ -85,6 +89,18 @@ def run() -> None:
     cat_cols = sorted(ren.values())
     counts = counts.merge(wide, on=keys, how="left")
     counts[cat_cols] = counts[cat_cols].fillna(0).astype(int)
+
+    # Drop categories that are almost always zero. Below roughly one
+    # non-zero LSOA-month in seven there is no within-LSOA variation left
+    # to model, and log1p of a near-constant zero column just adds a
+    # degenerate covariate.
+    nonzero = (counts[cat_cols] > 0).mean()
+    drop = sorted(nonzero[nonzero < MIN_NONZERO_FRACTION].index)
+    if drop:
+        log.info("Dropping %d sparse categories (<%.0f%% non-zero): %s",
+                 len(drop), 100 * MIN_NONZERO_FRACTION, ", ".join(drop))
+        counts = counts.drop(columns=drop)
+        cat_cols = [c for c in cat_cols if c not in drop]
     log.info("Aggregated: %d LSOA×month rows, %d crime categories",
              len(counts), len(cat_cols))
 

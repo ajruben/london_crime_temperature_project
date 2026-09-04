@@ -108,8 +108,19 @@ vars_full <- c("mean_temperature",
                "bars_pubs_count_within",
                "sports_count_within",
                "pct_park_area_within")
+# GTWR_COVARIATES overrides the list explicitly (comma separated), which is
+# what you want when a covariate in vars_full is not one you trust -- e.g.
+# mean_temperature is synthetic unless a raster was supplied, whereas
+# population_density is real census data and actually varies in space.
+.cov_env <- Sys.getenv("GTWR_COVARIATES", unset = "")
 minimal <- isTRUE(Sys.getenv("GTWR_MINIMAL", unset = "0") == "1")
-vars <- if (minimal) c("mean_temperature") else vars_full
+vars <- if (nzchar(.cov_env)) {
+  trimws(strsplit(.cov_env, ",", fixed = TRUE)[[1]])
+} else if (minimal) {
+  c("mean_temperature")
+} else {
+  vars_full
+}
 available <- intersect(vars, colnames(crimedata_spt@data))
 missing_vars <- setdiff(vars, available)
 if (length(missing_vars)) {

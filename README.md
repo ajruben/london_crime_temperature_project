@@ -83,8 +83,10 @@ For real data use HadUK-Grid monthly mean temperature (1 km, `tas`) from CEDA
 `finished_data.gpkg` is one row per LSOA-month with:
 
 - `crime_count`, `log_crime_count` — total recorded crime
-- `n_<type>` — a count per crime type (14 of them: `n_burglary`,
-  `n_bicycle_theft`, `n_violent_crime`, …)
+- `n_<type>` — a count per crime type (12 of them: `n_burglary`,
+  `n_bicycle_theft`, `n_violent_crime`, …). Categories non-zero in under
+  15% of LSOA-months are dropped at build time — below that there is no
+  within-LSOA variation left to fit.
 - `mean_temperature`
 - `population`, `population_density`, `households` (2011 census, from the LSOA
   boundary file)
@@ -105,6 +107,7 @@ Environment variables:
 | `GTWR_RESPONSE` | `crime_count` | which count to model, e.g. `n_burglary` |
 | `GTWR_SAMPLE_N` | unset = all rows; `run_pipeline.py` passes `800` | subsample size |
 | `GTWR_MINIMAL` | `0` | `1` = temperature only; `0` adds any of the covariate list present in the data (currently `population_density`) |
+| `GTWR_COVARIATES` | *(unset)* | explicit comma-separated covariates, overriding `GTWR_MINIMAL` |
 
 ```bash
 export GWMODEL_REPO=/path/to/GWmodel
