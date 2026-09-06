@@ -1,7 +1,6 @@
 # London crime & temperature
 
 [Project page](https://www.rubenswarts.nl/projects/2.html) ·
-[rubenswarts.nl](https://rubenswarts.nl)
 
 Monthly recorded crime for London LSOAs, joined to gridded temperature and
 modelled with geographically and temporally weighted regression (GTWR).
