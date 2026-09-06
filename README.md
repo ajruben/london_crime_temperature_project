@@ -136,3 +136,38 @@ Two things to keep in mind before reading much into a high GTWR R-squared:
   about 1.3 degC. So it is close to a seasonal indicator, and the temperature
   effect cannot be separated from daylight, school holidays or tourism with a
   single year of monthly data.
+
+---
+
+## Authorship
+
+This project is a mix of my own work and AI-assisted work. The split:
+
+**Mine, without AI**
+
+- Identifying and gathering the data sources.
+- Extraction, cleaning and reshaping.
+- Exploratory analysis.
+- Identifying the GTWR performance bottleneck (2025) and the original refactor
+  from nested loops to vectorised arithmetic — see the `GWmodel` fork.
+
+**AI-assisted (Claude Code), under my direction and review**
+
+- Making the pipeline reproducible: pinned dependencies, the R setup script,
+  the documented environment, and this README.
+- Re-implementing the vectorised GTWR in R, plus a number of additional fixes
+  found along the way — most significantly **blocking** the distance matrix
+  construction and the related memory work, which is what lets the full
+  34,013-row panel be fitted at all. Details in the `GWmodel` fork.
+- Splitting recorded crime into per-type counts, carrying population through
+  from the boundary file, and making the temperature step refuse to substitute
+  a synthetic series without being told to.
+
+**Why the vectorisation was redone with AI rather than restored**
+
+1. I no longer had the code for the original GTWR fix.
+2. AI has become good enough that, with my oversight and my familiarity with
+   this project, I was comfortable having it redo the work.
+
+The data work and the bottleneck analysis are mine and predate the AI work; the
+blocking that made the full panel fit is not.
