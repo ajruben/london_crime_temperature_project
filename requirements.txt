@@ -1,0 +1,13 @@
+# Python dependencies for the London crime/temperature pipeline.
+# Versions are those the pipeline was last run and verified against
+# (Python 3.13, Windows 11). geopandas 1.x uses pyogrio, not fiona.
+geopandas==1.1.4
+numpy==2.3.1
+pandas==2.3.0
+pyarrow==20.0.0
+pyogrio==0.13.0
+pyproj==3.7.2
+rasterio==1.5.1
+rasterstats==0.21.0
+requests==2.32.4
+shapely==2.1.2
