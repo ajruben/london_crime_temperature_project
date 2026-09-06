@@ -1,15 +1,68 @@
-rubenswarts.nl
-https://www.rubenswarts.nl/projects/2
-
 # London crime & temperature
 
-Monthly recorded crime for London LSOAs joined to gridded temperature, fitted
-with a geographically & temporally weighted regression (GTWR).
+[Project page](https://www.rubenswarts.nl/projects/2.html) ·
+[rubenswarts.nl](https://rubenswarts.nl)
 
-## Setup from a clean machine
+Monthly recorded crime for London LSOAs, joined to gridded temperature and
+modelled with geographically and temporally weighted regression (GTWR).
 
-Both repos must sit **side by side** — the pipeline finds the patched GWmodel
-fork as a sibling directory:
+This project is set up based on the joint work of my and my peers during a school project. we did the research and data work without AI. 
+In 2025, I found a performance bottleneck in `GWmodel`'s GTWR implementation and replaced its nested loops with vectorised arithmetic. 
+I later lost that code while moving between machines. 
+In this repo, I used AI to help rebuild the fix in R, make the work reproducible and benchmark it.
+Running the model on the data we had was not possible before the improvements.
+
+## Authorship and use of AI
+
+### My work, without AI
+
+- Finding and assessing the data sources.
+- Extracting the source data.
+- Cleaning, reshaping and joining the data.
+- Exploring the data and developing the modelling approach.
+- Finding the GTWR performance bottleneck in 2025.
+- Designing and implementing the original vectorisation of the nested GTWR
+  loops.
+
+Some of this work is in `code/data_munching_and_exploration/`.
+
+### Work I used AI for
+
+- Turning my data work into a reproducible pipeline.
+- Rewriting my lost vectorisation fix in R, based on my description of how it
+  worked.
+- Finding more performance improvements. The main one was processing the
+  distance matrix in **blocks**, along with related memory fixes. This made it
+  possible to fit all 34,013 rows.
+
+I directed and checked the AI-assisted work. AI did not choose the data, do the
+original extraction or exploration, find the original GTWR bottleneck, or
+design the original vectorisation. Blocking and the related extra fixes came
+from the AI-assisted rewrite. See the
+[`GWmodel` fork](https://github.com/ajruben/GWmodel/tree/vectorize-gtwr) for the
+implementation.
+
+## Why AI rewrote the vectorisation
+
+I lost the code for my original GTWR fix while moving between machines. When I
+returned to the project, my R was rusty, so I used AI to rewrite the fix from
+my description of it. During the rewrite, it also found the blocking and memory
+improvements.
+
+## Scale
+
+The full panel is 34,013 LSOA-months. A full-data fit takes ~13 min and peaks
+around 52 GB of RAM on 15 cores; bandwidth selection is ~85% of that time (it
+is still a serial loop in `bw.gtwr`). `GTWR_SAMPLE_N` subsamples for quicker
+iteration. A sample of 14,000 rows runs in ~5 min using under 21 GB.
+
+These timings are for the rebuilt version of my original vectorisation,
+including the extra AI-assisted fixes.
+
+## Reproducing the analysis
+
+Both repos must sit **side by side**. The pipeline finds the patched GWmodel
+fork in the sibling directory:
 
 ```
 parent/
@@ -28,45 +81,20 @@ python code/scripts/pipeline/run_pipeline.py
 ```
 
 **Requirements:** Python 3.11+, R >= 4.5, and a matching Rtools on Windows
-(Rtools45 covers R 4.5 and 4.6) — GWmodel contains C++ and will not install
+(Rtools45 covers R 4.5 and 4.6). GWmodel contains C++ and will not install
 without a toolchain. `winget install RProject.Rtools` is enough.
 
 First run fetches boundaries, crime and temperature; responses are cached under
 `cache/` keyed by request, so re-runs resume rather than refetch. The crime API
-(`data.police.uk`) returns intermittent 502s — just re-run, the cache means it
-picks up where it stopped.
+(`data.police.uk`) returns intermittent 502s. Re-run it and the cache lets it
+pick up where it stopped.
 
 **The crime API serves a rolling 36-month window** (as of 2026-09: 2023-08 to
 2026-07). `START_MONTH`/`END_MONTH` in `common.py` currently ask for 2024, so
-that becomes unfetchable from around 2027-01. The per-request cache under
-`cache/` is what makes an old window reproducible — but only the boundary
-downloads are committed, not the crime responses. Archive
-`data/raw/crime/*.parquet` if you need this exact panel later.
+that becomes unavailable from around 2027-01. After that, archived data must be
+downloaded separately.
 
-## Temperature data: read this first
-
-`aggregate_temperature.py` uses a real raster if one is present in
-`data/raw/temperature/` and otherwise **synthesises** the series. The
-synthetic fallback is London monthly climatology minus a north-south ramp
-plus a seeded per-LSOA offset -- i.e. 12 distinct values and a constant per
-LSOA, correlating 0.999 with the hardcoded climatology.
-
-A "temperature effect" estimated from the synthetic series is a **seasonality**
-effect wearing degC units, and its spatial variation is a ramp plus
-`default_rng(42)` noise, so a geographically weighted temperature coefficient
-fits that noise.
-
-The pipeline now refuses to synthesise unless you pass
-`ALLOW_SYNTHETIC_TEMPERATURE=1`, records provenance in
-`data/raw/temperature/temperature_source.txt`, and warns on every run that
-reuses a synthetic file.
-
-For real data use HadUK-Grid monthly mean temperature (1 km, `tas`) from CEDA
-(free, registration required: <https://catalogue.ceda.ac.uk/>, search
-"HadUK-Grid"); drop the NetCDF in `data/raw/temperature/` and delete
-`temperature_by_lsoa_month.parquet` to force a rebuild.
-
-## Pipeline
+## Reproducible pipeline
 
 `run_pipeline.py` runs four Python steps then the R fit:
 
@@ -78,21 +106,24 @@ For real data use HadUK-Grid monthly mean temperature (1 km, `tas`) from CEDA
 | `build_gpkg.py` | `data/finished_data.gpkg` |
 | `code/model/GTWR_crime.r` | `results/gtwr_fit_<stamp>.rds` + diagnostics |
 
-## The modelling data
+I used AI to set up this pipeline. The data choices, transformations and
+modelling decisions came from my earlier work.
+
+## Modelling data
 
 `finished_data.gpkg` is one row per LSOA-month with:
 
-- `crime_count`, `log_crime_count` — total recorded crime
-- `n_<type>` — a count per crime type (12 of them: `n_burglary`,
+- `crime_count`, `log_crime_count`: total recorded crime
+- `n_<type>`: a count per crime type (12 of them: `n_burglary`,
   `n_bicycle_theft`, `n_violent_crime`, …). Categories non-zero in under
-  15% of LSOA-months are dropped at build time — below that there is no
+  15% of LSOA-months are dropped at build time. Below that there is no
   within-LSOA variation left to fit.
 - `mean_temperature`
 - `population`, `population_density`, `households` (2011 census, from the LSOA
   boundary file)
 
 **Model crime types separately.** They respond to temperature with opposite
-signs — bicycle theft rises about +3.4%/degC and anti-social behaviour +2.5%,
+signs. Bicycle theft rises about +3.4%/degC and anti-social behaviour +2.5%,
 while burglary falls -1.4% and theft-from-the-person -2.4%. Summing them into
 one total cancels most of the signal.
 
@@ -117,57 +148,3 @@ GTWR_RESPONSE=n_burglary Rscript code/model/GTWR_crime.r
 Results are written to `results/` timestamped per run. The fit uses all but one
 physical core.
 
-## Scale
-
-The full panel is 34,013 LSOA-months. A full-data fit takes ~13 min and peaks
-around 52 GB of RAM on 15 cores; bandwidth selection is ~85% of that time (it
-is still a serial loop in `bw.gtwr`). `GTWR_SAMPLE_N` subsamples for quicker
-iteration — n=14,000 runs in ~5 min under 21 GB.
-
-## Interpreting the fit
-
-Two things to keep in mind before reading much into a high GTWR R-squared:
-
-- 85% of log-crime variance is *which LSOA*, and the local intercept absorbs
-  it. Plain LSOA means score R-squared 0.85 with no temperature term at all,
-  which is higher than the full GTWR fit. Benchmark against that, not against
-  the global regression.
-- `mean_temperature` is 99.8% *month* — within any month London spans only
-  about 1.3 degC. So it is close to a seasonal indicator, and the temperature
-  effect cannot be separated from daylight, school holidays or tourism with a
-  single year of monthly data.
-
----
-
-## Authorship
-
-This project is a mix of my own work and AI-assisted work. The split:
-
-**Mine, without AI**
-
-- Identifying and gathering the data sources.
-- Extraction, cleaning and reshaping.
-- Exploratory analysis.
-- Identifying the GTWR performance bottleneck (2025) and the original refactor
-  from nested loops to vectorised arithmetic — see the `GWmodel` fork.
-
-**AI-assisted (Claude Code), under my direction and review**
-
-- Making the pipeline reproducible: pinned dependencies, the R setup script,
-  the documented environment, and this README.
-- Re-implementing the vectorised GTWR in R, plus a number of additional fixes
-  found along the way — most significantly **blocking** the distance matrix
-  construction and the related memory work, which is what lets the full
-  34,013-row panel be fitted at all. Details in the `GWmodel` fork.
-- Splitting recorded crime into per-type counts, carrying population through
-  from the boundary file, and making the temperature step refuse to substitute
-  a synthetic series without being told to.
-
-**Why the vectorisation was redone with AI rather than restored**
-
-1. I no longer had the code for the original GTWR fix.
-2. AI has become good enough that, with my oversight and my familiarity with
-   this project, I was comfortable having it redo the work.
-
-The data work and the bottleneck analysis are mine and predate the AI work; the
-blocking that made the full panel fit is not.
